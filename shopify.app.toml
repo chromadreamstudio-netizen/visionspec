@@ -2,7 +2,7 @@
 
 client_id = "a1db5345bf74147183b31ec8b0b45785"
 name = "visionspec-pro"
-application_url = "https://example.com"
+application_url = "https://visionspec.vercel.app"
 embedded = true
 
 [access_scopes]
@@ -29,7 +29,11 @@ api_version = "2026-07"
   topics = [ "app/scopes_update" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ 
+  "https://visionspec.vercel.app/auth/callback",
+  "https://visionspec.vercel.app/auth/shopify/callback",
+  "https://visionspec.vercel.app/api/auth/callback"
+]
 
 [build]
 include_config_on_deploy = true
