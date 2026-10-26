@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useEffect } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useActionData, useNavigation, Form, useLoaderData } from "react-router";
 import {
@@ -14,24 +14,36 @@ import {
   Banner,
   Select,
   Grid,
+  Badge,
+  Checkbox,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import { GoogleGenAI } from "@google/genai";
 
-// 1. Loader: Fetch Products
+// 1. Loader: سحب المنتجات مع كامل تفاصيلها المخفية (SKU, Variants, Images, Vendor)
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   try {
     const response = await admin.graphql(
       `query {
-        products(first: 20, reverse: true) {
+        products(first: 30, reverse: true) {
           edges {
             node {
               id
               title
+              vendor
+              productType
               images(first: 1) {
                 edges {
                   node { url }
+                }
+              }
+              variants(first: 15) {
+                edges {
+                  node {
+                    sku
+                    title
+                  }
                 }
               }
             }
@@ -60,7 +72,7 @@ async function generateWithRetry(ai: GoogleGenAI, modelName: string, contents: a
   }
 }
 
-// 2. Action: Generation and Injection
+// 2. Action: التوليد الذكي والحقن الشامل (وصف + عنوان + Google SEO)
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -69,8 +81,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (actionType === "generate") {
     const productId = formData.get("selectedProduct") as string;
     const language = formData.get("language") as string;
+    const category = formData.get("category") as string;
     
-    // Fact-based inputs
+    // Ground Truth Inputs
+    const rawSpecs = formData.get("rawSpecs") as string;
     const length = formData.get("length") as string;
     const width = formData.get("width") as string;
     const height = formData.get("height") as string;
@@ -88,8 +102,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         `query getProduct($id: ID!) {
           product(id: $id) {
             title
+            vendor
+            productType
             descriptionHtml
             images(first: 1) { edges { node { url } } }
+            variants(first: 15) {
+              edges {
+                node {
+                  sku
+                  title
+                }
+              }
+            }
           }
         }`,
         { variables: { id: productId } }
@@ -100,55 +124,78 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (!product) return Response.json({ error: "Product not found." });
 
       const imageUrl = product.images?.edges[0]?.node?.url;
+      const skus = Array.from(new Set(product.variants?.edges?.map((e: any) => e.node.sku).filter(Boolean))).join(", ");
+      const variantOptions = product.variants?.edges
+        ?.map((e: any) => e.node.title)
+        .filter((t: string) => t && t !== "Default Title")
+        .join(", ");
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const modelName = process.env.GEMINI_MODEL || "gemini-1.5-flash"; 
+      const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash"; 
       
-      const systemPrompt = `You are a world-class e-commerce copywriter and technical data analyst.
-      Analyze the provided product title, current description, image (if available), and STRICT FACTUAL DATA provided by the merchant.
-      
-      Your goal is to generate a complete, high-converting product listing in pure HTML.
-      
-      CRITICAL INSTRUCTIONS:
-      1. MUST Output the entire response in ${language}.
-      2. DO NOT invent or hallucinate dimensions, warranties, or safety notices. ONLY use the 'Merchant Provided Facts' below.
-      3. If a material or feature is clearly visible in the image, you may include it.
-      
-      OUTPUT FORMAT (Generate ONLY HTML, no markdown wrapping, no \`\`\`html):
-      
-      <div class="visionspec-listing">
-        <h2 style="font-size: 1.5em; font-weight: bold; margin-bottom: 15px;">[SEO Optimized, Catchy Product Title - based on image and facts]</h2>
-        
-        <div style="margin-bottom: 25px; line-height: 1.6;">
-          <p>[Sales Paragraph 1: Focus on the emotional benefit, luxury, or problem solved, utilizing keywords if provided.]</p>
-          <p>[Sales Paragraph 2: Focus on the quality, materials visible in the image, and practical use.]</p>
-        </div>
-        
-        <h3 style="font-size: 1.2em; font-weight: bold; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px;">Technical Specifications</h3>
-        <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
-           <tr style="background-color: #f9fafb; border-bottom: 1px solid #e5e7eb;">
-             <th style="padding: 12px; text-align: left; font-weight: 600; width: 40%;">Specification</th>
-             <th style="padding: 12px; text-align: left; font-weight: 600;">Details</th>
-           </tr>
-           [Generate table rows based ONLY on provided facts and visible image features. DO NOT invent warranties.]
-        </table>
-        
-        [IF Merchant specified Safety Notice = YES, include this exact block, otherwise OMIT IT COMPLETELY]:
-        <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 15px; margin-top: 20px; border-radius: 4px;">
-           <strong style="color: #b91c1c; display: block; margin-bottom: 5px;">⚠️ Safety & Compliance Notice</strong>
-           <p style="margin: 0; color: #7f1d1d; font-size: 0.9em;">Complies with General Product Safety Regulation (EU) 2023/988 consumer standards. Please inspect periodically for wear or loose parts.</p>
-        </div>
-      </div>`;
+      const systemPrompt = `You are an elite E-Commerce Conversion Copywriter, Technical Engineer, and SEO Specialist.
+Analyze the provided product details, product image (if available), and STRICT GROUND-TRUTH FACTS from the merchant.
 
-      // Construct Fact String
-      let facts = `MERCHANT PROVIDED FACTS (USE THESE EXACTLY, DO NOT INVENT):\n`;
-      if (length || width || height) facts += `- Dimensions: ${length || '?'} x ${width || '?'} x ${height || '?'} ${unit}\n`;
-      if (isEco === 'yes') facts += `- Environment: Eco-Friendly / Sustainable Materials\n`;
+CRITICAL RULES:
+1. Write all output entirely in ${language}.
+2. ZERO HALLUCINATION POLICY: Never invent dimensions, sub-component measurements, warranties, or certifications. Use ONLY the merchant's facts, raw factory specs, and clearly visible features from the image.
+3. Parse any "Raw Factory / Complex Specs" (such as Nest size, Base dimensions, Midsole, Post height, Jute/Sisal materials) into separate, crystal-clear rows inside the Technical Specifications table.
+4. Industry Context: Tailor the tone and benefits for the "${category}" sector.
+
+Return your response as a valid JSON object ONLY (no markdown formatting, no \`\`\`json) with this exact structure:
+{
+  "seoTitle": "High-converting, SEO-optimized Product Title",
+  "metaTitle": "Google Search SEO Title (Max 60 characters)",
+  "metaDescription": "Compelling Google Search Meta Description (Max 155 characters)",
+  "htmlContent": "Complete HTML for the product description following the exact template below"
+}
+
+HTML TEMPLATE FOR "htmlContent":
+<div class="visionspec-smart-listing" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; line-height: 1.6;">
+  <h2 style="font-size: 1.4em; font-weight: 700; color: #111827; margin-bottom: 12px;">[Insert Catchy Headline]</h2>
+  <p style="margin-bottom: 16px; font-size: 1.05em; color: #374151;">[Engaging opening paragraph highlighting primary benefits, comfort/durability, and target use]</p>
+  
+  <h3 style="font-size: 1.15em; font-weight: 600; color: #111827; margin-top: 24px; margin-bottom: 12px;">✨ Key Highlights & Features</h3>
+  <ul style="margin-bottom: 24px; padding-left: 20px; color: #374151;">
+    <li style="margin-bottom: 8px;"><strong>[Feature 1 Name]:</strong> [Benefit-driven explanation based on facts/image]</li>
+    <li style="margin-bottom: 8px;"><strong>[Feature 2 Name]:</strong> [Benefit-driven explanation]</li>
+    <li style="margin-bottom: 8px;"><strong>[Feature 3 Name]:</strong> [Benefit-driven explanation]</li>
+  </ul>
+
+  <h3 style="font-size: 1.15em; font-weight: 600; color: #111827; margin-bottom: 12px; border-bottom: 2px solid #e5e7eb; padding-bottom: 6px;">📐 Technical Specifications & Dimensions</h3>
+  <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 0.95em; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+    <thead>
+      <tr style="background-color: #111827; color: #ffffff; text-align: left;">
+        <th style="padding: 12px 16px; width: 40%;">Specification / Component</th>
+        <th style="padding: 12px 16px;">Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      [Generate alternating table rows (#ffffff and #f9fafb) with padding: 12px 16px; border-bottom: 1px solid #e5e7eb;. Include SKU, Available Options/Colors, Materials, and every single dimension/sub-dimension provided in Raw Factory Specs or Overall Dimensions. Do NOT include warranty row unless explicitly provided.]
+    </tbody>
+  </table>
+
+  [IF Safety Notice is YES, include this exact block, otherwise OMIT COMPLETELY]:
+  <div style="background-color: #fef2f2; border-left: 4px solid #dc2626; padding: 16px; margin-top: 24px; border-radius: 6px;">
+    <strong style="color: #991b1b; display: block; margin-bottom: 4px; font-size: 0.95em;">🛡️ EU GPSR & Product Safety Compliance</strong>
+    <p style="margin: 0; color: #7f1d1d; font-size: 0.9em;">Keep away from open flames. Inspect periodically for wear or loose parts. Complies with General Product Safety Regulation (EU) 2023/988 consumer standards.</p>
+  </div>
+</div>`;
+
+      // Construct Ground Truth String
+      let facts = `MERCHANT GROUND-TRUTH FACTS (STRICTLY ENFORCE):\n`;
+      if (product.vendor) facts += `- Brand / Vendor: ${product.vendor}\n`;
+      if (skus) facts += `- Stock Code (SKU): ${skus}\n`;
+      if (variantOptions) facts += `- Available Variants / Colors: ${variantOptions}\n`;
+      if (rawSpecs) facts += `- Raw Factory / Multi-Part Specifications (Parse all of these into the table!): \n${rawSpecs}\n`;
+      if (length || width || height) facts += `- Overall Dimensions: ${length || '-'} x ${width || '-'} x ${height || '-'} ${unit}\n`;
+      if (isEco === 'yes') facts += `- Sustainability: Eco-Friendly & Non-Toxic Materials\n`;
       if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}\n`;
-      if (hasWarranty === 'no') facts += `- Warranty: No Warranty\n`;
-      if (keywords) facts += `- Focus Keywords: ${keywords}\n`;
+      if (hasWarranty === 'no') facts += `- Warranty: None (Do NOT mention any warranty)\n`;
+      facts += `- Include EU Safety Notice Block: ${requiresSafety === 'yes' ? 'YES' : 'NO'}\n`;
+      if (keywords) facts += `- Target SEO Keywords: ${keywords}\n`;
 
-      let textPart = `Original Product Title: ${product.title}\n\n${facts}`;
+      const textPart = `Original Product Title: ${product.title}\n\n${facts}`;
       let contents: any[] = [];
       
       if (imageUrl) {
@@ -170,13 +217,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       const response = await generateWithRetry(ai, modelName, contents);
-      let rawHtml = response.text || "";
-      rawHtml = rawHtml.replace(/```html/g, "").replace(/```/g, "").trim();
+      let rawText = response.text || "";
+      rawText = rawText.replace(/```json/g, "").replace(/```html/g, "").replace(/```/g, "").trim();
+
+      let parsedResult;
+      try {
+        parsedResult = JSON.parse(rawText);
+      } catch (e) {
+        parsedResult = {
+          seoTitle: product.title,
+          metaTitle: product.title.slice(0, 60),
+          metaDescription: "High quality product verified by VisionSpec Pro AI.",
+          htmlContent: rawText,
+        };
+      }
 
       return Response.json({ 
         actionType: "generate",
         success: true, 
-        generatedContent: rawHtml,
+        generatedContent: parsedResult.htmlContent,
+        seoTitle: parsedResult.seoTitle,
+        metaTitle: parsedResult.metaTitle,
+        metaDescription: parsedResult.metaDescription,
         selectedProduct: productId 
       });
     } catch (error: any) {
@@ -187,13 +249,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (actionType === "inject") {
     const productId = formData.get("productId") as string;
     const htmlContent = formData.get("htmlContent") as string;
+    const seoTitle = formData.get("seoTitle") as string;
+    const metaTitle = formData.get("metaTitle") as string;
+    const metaDescription = formData.get("metaDescription") as string;
+    const applyNewTitle = formData.get("applyNewTitle") === "true";
+    const applySeoMeta = formData.get("applySeoMeta") === "true";
 
     if (!productId || !htmlContent) {
       return Response.json({ error: "Missing product ID or HTML content." });
     }
 
     try {
-      // Overwrite the description completely with the new smart listing
+      const productInput: any = {
+        id: productId,
+        descriptionHtml: htmlContent,
+      };
+
+      if (applyNewTitle && seoTitle) {
+        productInput.title = seoTitle;
+      }
+
+      if (applySeoMeta && (metaTitle || metaDescription)) {
+        productInput.seo = {
+          title: metaTitle,
+          description: metaDescription,
+        };
+      }
+
       const updateMutation = `
         mutation productUpdate($input: ProductInput!) { 
           productUpdate(input: $input) { 
@@ -203,12 +285,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }`;
       
       const updateRes = await admin.graphql(updateMutation, { 
-        variables: { 
-          input: { 
-            id: productId, 
-            descriptionHtml: htmlContent 
-          } 
-        } 
+        variables: { input: productInput } 
       });
 
       const updateData = await updateRes.json();
@@ -219,7 +296,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return Response.json({ error: `Shopify API Error: ${errorMsg}` });
       }
 
-      return Response.json({ actionType: "inject", success: true, message: "Smart Listing injected magically! ✨" });
+      return Response.json({ 
+        actionType: "inject", 
+        success: true, 
+        message: "Product Description, Technical Specs, and Google SEO Meta updated! 🚀" 
+      });
     } catch (error: any) {
       const gqlErrors = error?.graphQLErrors || error?.body?.errors;
       const details = gqlErrors ? JSON.stringify(gqlErrors) : (error.message || error);
@@ -236,7 +317,7 @@ export default function Index() {
   const nav = useNavigation();
   
   const productOptions = [
-    { label: '--- Select a product ---', value: '' },
+    { label: '--- Select a product from your store ---', value: '' },
     ...(products || []).map((edge: any) => ({
       label: edge.node.title,
       value: edge.node.id,
@@ -245,15 +326,26 @@ export default function Index() {
 
   const languageOptions = [
     { label: 'English', value: 'English' },
-    { label: 'العربية (Arabic)', value: 'Arabic' },
     { label: 'Türkçe (Turkish)', value: 'Turkish' },
+    { label: 'العربية (Arabic)', value: 'Arabic' },
     { label: 'Français (French)', value: 'French' },
+    { label: 'Deutsch (German)', value: 'German' },
+  ];
+
+  const categoryOptions = [
+    { label: '🐾 Pet Supplies & Cat/Dog Furniture', value: 'Pet Supplies & Furniture' },
+    { label: '🛋️ Home, Furniture & Decor', value: 'Home & Furniture' },
+    { label: '👕 Apparel & Fashion', value: 'Apparel & Fashion' },
+    { label: '🔌 Electronics & Smart Gadgets', value: 'Electronics' },
+    { label: '📦 General E-Commerce Product', value: 'General E-Commerce' },
   ];
 
   const [selectedProduct, setSelectedProduct] = useState("");
   const [language, setLanguage] = useState("English");
+  const [category, setCategory] = useState("Pet Supplies & Furniture");
   
   // Fact-based states
+  const [rawSpecs, setRawSpecs] = useState("");
   const [length, setLength] = useState("");
   const [width, setWidth] = useState("");
   const [height, setHeight] = useState("");
@@ -261,34 +353,60 @@ export default function Index() {
   const [isEco, setIsEco] = useState("no");
   const [hasWarranty, setHasWarranty] = useState("no");
   const [warrantyPeriod, setWarrantyPeriod] = useState("");
-  const [requiresSafety, setRequiresSafety] = useState("no");
+  const [requiresSafety, setRequiresSafety] = useState("yes");
   const [keywords, setKeywords] = useState("");
+
+  // Injection options
+  const [applyNewTitle, setApplyNewTitle] = useState(false);
+  const [applySeoMeta, setApplySeoMeta] = useState(true);
+
+  // Editable SEO Preview states
+  const [editableSeoTitle, setEditableSeoTitle] = useState("");
+  const [editableMetaTitle, setEditableMetaTitle] = useState("");
+  const [editableMetaDesc, setEditableMetaDesc] = useState("");
+
+  // Find active product object for Live Inspector
+  const activeProductNode = (products || []).find((edge: any) => edge.node.id === selectedProduct)?.node;
+  const activeImageUrl = activeProductNode?.images?.edges?.[0]?.node?.url;
+  const activeSkus = Array.from(new Set(activeProductNode?.variants?.edges?.map((e: any) => e.node.sku).filter(Boolean))).join(", ");
+  const activeVariants = activeProductNode?.variants?.edges
+    ?.map((e: any) => e.node.title)
+    .filter((t: string) => t && t !== "Default Title")
+    .join(", ");
 
   const isGenerating = nav.state === "submitting" && nav.formData?.get("_action") === "generate";
   const isInjecting = nav.state === "submitting" && nav.formData?.get("_action") === "inject";
 
   useEffect(() => {
+    if (actionData?.actionType === "generate" && actionData.success) {
+      setEditableSeoTitle(actionData.seoTitle || "");
+      setEditableMetaTitle(actionData.metaTitle || "");
+      setEditableMetaDesc(actionData.metaDescription || "");
+    }
     if (actionData?.actionType === "inject" && actionData.success) {
-      if (typeof shopify !== 'undefined') shopify.toast.show("Listing updated successfully!");
+      if (typeof shopify !== 'undefined') shopify.toast.show("Product & Google SEO updated!");
     }
   }, [actionData]);
 
   return (
-    <Page title="VisionSpec Pro AI" subtitle="Smart Listing Generator">
+    <Page 
+      title="VisionSpec Pro AI" 
+      subtitle="Enterprise Product Intelligence, Multi-Part Spec Builder & Google SEO Engine"
+    >
       <BlockStack gap="500">
         <Layout>
           
           {actionData?.actionType === "inject" && actionData.success && (
             <Layout.Section>
-              <Banner tone="success">
-                {actionData.message} Check your Shopify product page.
+              <Banner tone="success" title="Published to Shopify Storefront">
+                {actionData.message}
               </Banner>
             </Layout.Section>
           )}
 
           {actionData?.error && (
             <Layout.Section>
-              <Banner tone="critical">
+              <Banner tone="critical" title="System Alert">
                 {actionData.error}
               </Banner>
             </Layout.Section>
@@ -299,11 +417,14 @@ export default function Index() {
               <input type="hidden" name="_action" value="generate" />
               
               <Grid>
-                {/* Left Column: Essential Setup */}
+                {/* Left Column: Product Inspector & Context */}
                 <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 6, xl: 6}}>
                   <Card>
                     <BlockStack gap="400">
-                      <Text as="h2" variant="headingMd">1. Basic Setup</Text>
+                      <InlineStack align="space-between" blockAlign="center">
+                        <Text as="h2" variant="headingMd">1. Product & Visual Inspector</Text>
+                        <Badge tone="info">Auto-Sync</Badge>
+                      </InlineStack>
                       
                       <Select
                         label="Target Product"
@@ -311,11 +432,51 @@ export default function Index() {
                         options={productOptions}
                         onChange={setSelectedProduct}
                         value={selectedProduct}
-                        helpText="Select the product to analyze."
+                      />
+
+                      {/* Live Visual Preview of Selected Product */}
+                      {activeProductNode && (
+                        <div style={{ padding: '14px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                          <InlineStack gap="400" blockAlign="center" wrap={false}>
+                            {activeImageUrl ? (
+                              <img 
+                                src={activeImageUrl} 
+                                alt={activeProductNode.title} 
+                                style={{ width: '76px', height: '76px', objectFit: 'cover', borderRadius: '8px', border: '1px solid #cbd5e1' }} 
+                              />
+                            ) : (
+                              <div style={{ width: '76px', height: '76px', backgroundColor: '#e2e8f0', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', color: '#64748b' }}>
+                                No Image
+                              </div>
+                            )}
+                            <BlockStack gap="100">
+                              <Text as="p" variant="bodyMd" fontWeight="bold">{activeProductNode.title}</Text>
+                              <Text as="p" variant="bodySm" tone="subdued">
+                                <strong>Brand:</strong> {activeProductNode.vendor || 'N/A'} | <strong>SKU:</strong> {activeSkus || 'None'}
+                              </Text>
+                              {activeVariants && (
+                                <Text as="p" variant="bodySm" tone="subdued">
+                                  <strong>Detected Options:</strong> {activeVariants}
+                                </Text>
+                              )}
+                              <Badge tone={activeImageUrl ? "success" : "warning"}>
+                                {activeImageUrl ? "✓ Image Ready for AI Vision Scan" : "No Image Found"}
+                              </Badge>
+                            </BlockStack>
+                          </InlineStack>
+                        </div>
+                      )}
+
+                      <Select
+                        label="Industry & Category Template"
+                        name="category"
+                        options={categoryOptions}
+                        onChange={setCategory}
+                        value={category}
                       />
                       
                       <Select
-                        label="Output Language"
+                        label="Target Output Language"
                         name="language"
                         options={languageOptions}
                         onChange={setLanguage}
@@ -323,24 +484,40 @@ export default function Index() {
                       />
 
                       <TextField
-                        label="Focus Keywords (Optional)"
+                        label="Focus SEO Keywords (Optional)"
                         name="keywords"
                         value={keywords}
                         onChange={setKeywords}
                         autoComplete="off"
-                        placeholder="e.g. premium, durable, orthopedic"
-                        helpText="Keywords the AI will naturally weave into the sales copy."
+                        placeholder="e.g. cat scratching post, natural jute, triangular cat house"
+                        helpText="Keywords to naturally embed in description and Google Meta tags."
                       />
                     </BlockStack>
                   </Card>
                 </Grid.Cell>
 
-                {/* Right Column: Ground Truth Facts */}
+                {/* Right Column: Smart Factory Specs & Compliance */}
                 <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 6, xl: 6}}>
                   <Card>
                     <BlockStack gap="400">
-                      <Text as="h2" variant="headingMd">2. Ground Truth Facts</Text>
-                      <Text as="p" tone="subdued">Provide hard facts to prevent AI hallucinations.</Text>
+                      <InlineStack align="space-between" blockAlign="center">
+                        <Text as="h2" variant="headingMd">2. Factory Specs & Ground Truth</Text>
+                        <Badge tone="success">Zero Hallucination</Badge>
+                      </InlineStack>
+                      
+                      <TextField
+                        label="Smart Factory Specs Parser (Paste Multi-Part Specs / Notes)"
+                        name="rawSpecs"
+                        value={rawSpecs}
+                        onChange={setRawSpecs}
+                        multiline={4}
+                        autoComplete="off"
+                        placeholder="Paste raw factory notes here! Example:&#10;Nest: Width 36 cm, Depth 30 cm, Height 37 cm&#10;Midsole size: 35 x 42 cm | Base: 42 x 56 cm&#10;Total height: 85 cm | 42 cm natural jute-wrapped legs"
+                        helpText="Have complex multi-part dimensions like PugaloPet? Paste them raw in any format—AI will structure them into a clean engineering table."
+                      />
+
+                      <Divider />
+                      <Text as="p" variant="bodySm" tone="subdued">Or enter simple overall dimensions:</Text>
                       
                       <InlineStack gap="300" wrap={false}>
                         <div style={{flex: 1}}><TextField label="Length" name="length" type="number" value={length} onChange={setLength} autoComplete="off" /></div>
@@ -351,38 +528,41 @@ export default function Index() {
                         </div>
                       </InlineStack>
 
-                      <Divider />
-
                       <InlineStack gap="400">
-                        <Select
-                          label="Eco-Friendly?"
-                          name="isEco"
-                          options={[{label: 'No', value: 'no'}, {label: 'Yes', value: 'yes'}]}
-                          value={isEco}
-                          onChange={setIsEco}
-                        />
-                        <Select
-                          label="EU Safety Notice?"
-                          name="requiresSafety"
-                          options={[{label: 'No', value: 'no'}, {label: 'Yes (Add Warning)', value: 'yes'}]}
-                          value={requiresSafety}
-                          onChange={setRequiresSafety}
-                          helpText="Adds compliant GPSR alert box."
-                        />
+                        <div style={{flex: 1}}>
+                          <Select
+                            label="Eco-Friendly / Natural?"
+                            name="isEco"
+                            options={[{label: 'No / Unspecified', value: 'no'}, {label: 'Yes (Highlight Eco)', value: 'yes'}]}
+                            value={isEco}
+                            onChange={setIsEco}
+                          />
+                        </div>
+                        <div style={{flex: 1}}>
+                          <Select
+                            label="EU GPSR Safety Box?"
+                            name="requiresSafety"
+                            options={[{label: 'Yes (Add EU Compliance)', value: 'yes'}, {label: 'No', value: 'no'}]}
+                            value={requiresSafety}
+                            onChange={setRequiresSafety}
+                          />
+                        </div>
                       </InlineStack>
 
                       <InlineStack gap="400" blockAlign="end">
-                        <Select
-                          label="Warranty Available?"
-                          name="hasWarranty"
-                          options={[{label: 'No', value: 'no'}, {label: 'Yes', value: 'yes'}]}
-                          value={hasWarranty}
-                          onChange={setHasWarranty}
-                        />
+                        <div style={{flex: 1}}>
+                          <Select
+                            label="Warranty Included?"
+                            name="hasWarranty"
+                            options={[{label: 'No (Do Not Mention)', value: 'no'}, {label: 'Yes', value: 'yes'}]}
+                            value={hasWarranty}
+                            onChange={setHasWarranty}
+                          />
+                        </div>
                         {hasWarranty === 'yes' && (
                           <div style={{flex: 1}}>
                             <TextField
-                              label="Warranty Period"
+                              label="Warranty Duration"
                               name="warrantyPeriod"
                               value={warrantyPeriod}
                               onChange={setWarrantyPeriod}
@@ -400,42 +580,108 @@ export default function Index() {
 
               <div style={{ marginTop: '20px' }}>
                 <Card>
-                  <BlockStack align="center" inlineAlign="center">
+                  <InlineStack align="space-between" blockAlign="center">
+                    <BlockStack gap="100">
+                      <Text as="p" variant="bodyMd" fontWeight="bold">Ready to build your high-converting product page?</Text>
+                      <Text as="p" variant="bodySm" tone="subdued">Generates Sales Copy + Multi-Part Tech Table + Google Search SEO Meta Tags</Text>
+                    </BlockStack>
                     <Button submit variant="primary" size="large" loading={isGenerating} disabled={!selectedProduct}>
-                      Generate Smart Listing ✨
+                      Generate Complete Smart Listing ✨
                     </Button>
-                  </BlockStack>
+                  </InlineStack>
                 </Card>
               </div>
             </Form>
           </Layout.Section>
 
-          {/* Output Preview Section (No raw HTML) */}
+          {/* Output & SEO Suite Preview Section */}
           {actionData?.actionType === "generate" && actionData.success && actionData.generatedContent && (
             <Layout.Section>
               <Card>
-                <BlockStack gap="500">
-                  <InlineStack align="space-between" blockAlign="center">
-                    <Text as="h2" variant="headingMd">Visual Preview</Text>
-                    
-                    <Form method="post">
-                      <input type="hidden" name="_action" value="inject" />
-                      <input type="hidden" name="productId" value={actionData.selectedProduct} />
-                      <input type="hidden" name="htmlContent" value={actionData.generatedContent} />
-                      <Button submit variant="primary" loading={isInjecting}>
-                        Inject into Product Page
+                <Form method="post">
+                  <input type="hidden" name="_action" value="inject" />
+                  <input type="hidden" name="productId" value={actionData.selectedProduct} />
+                  <input type="hidden" name="htmlContent" value={actionData.generatedContent} />
+                  <input type="hidden" name="seoTitle" value={editableSeoTitle} />
+                  <input type="hidden" name="metaTitle" value={editableMetaTitle} />
+                  <input type="hidden" name="metaDescription" value={editableMetaDesc} />
+                  <input type="hidden" name="applyNewTitle" value={String(applyNewTitle)} />
+                  <input type="hidden" name="applySeoMeta" value={String(applySeoMeta)} />
+
+                  <BlockStack gap="500">
+                    <InlineStack align="space-between" blockAlign="center">
+                      <BlockStack gap="100">
+                        <Text as="h2" variant="headingLg">3. Review & One-Click Storefront Injection</Text>
+                        <Text as="p" variant="bodySm" tone="subdued">Verify your generated listing and SEO metadata before publishing.</Text>
+                      </BlockStack>
+                      <Button submit variant="primary" size="large" loading={isInjecting}>
+                        Publish All to Shopify 🚀
                       </Button>
-                    </Form>
-                  </InlineStack>
-                  
-                  <Divider />
-                  
-                  <div 
-                    style={{ padding: '20px', backgroundColor: '#fff', border: '1px solid #dfe3e8', borderRadius: '8px' }}
-                    dangerouslySetInnerHTML={{ __html: actionData.generatedContent }} 
-                  />
-                  
-                </BlockStack>
+                    </InlineStack>
+
+                    <Divider />
+
+                    {/* Google SEO & Title Booster Box */}
+                    <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                      <BlockStack gap="400">
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text as="h3" variant="headingMd">🔍 Google Search SEO & Title Booster</Text>
+                          <Badge tone="success">PRO Feature</Badge>
+                        </InlineStack>
+
+                        <TextField
+                          label="AI Suggested Product Title"
+                          value={editableSeoTitle}
+                          onChange={setEditableSeoTitle}
+                          autoComplete="off"
+                        />
+                        <Checkbox
+                          label="Overwrite main Shopify Product Title with this AI-optimized title"
+                          checked={applyNewTitle}
+                          onChange={setApplyNewTitle}
+                        />
+
+                        <Divider />
+
+                        <Grid>
+                          <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 6, xl: 6}}>
+                            <TextField
+                              label="Google SEO Meta Title"
+                              value={editableMetaTitle}
+                              onChange={setEditableMetaTitle}
+                              autoComplete="off"
+                              helpText={`${editableMetaTitle.length}/60 characters`}
+                            />
+                          </Grid.Cell>
+                          <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 6, xl: 6}}>
+                            <TextField
+                              label="Google SEO Meta Description"
+                              value={editableMetaDesc}
+                              onChange={setEditableMetaDesc}
+                              autoComplete="off"
+                              multiline={2}
+                              helpText={`${editableMetaDesc.length}/155 characters`}
+                            />
+                          </Grid.Cell>
+                        </Grid>
+
+                        <Checkbox
+                          label="Automatically inject Google SEO Meta Title & Description into Shopify Product SEO settings"
+                          checked={applySeoMeta}
+                          onChange={setApplySeoMeta}
+                        />
+                      </BlockStack>
+                    </div>
+
+                    <Divider />
+
+                    <Text as="h3" variant="headingMd">📄 Live Storefront Description Preview</Text>
+                    <div 
+                      style={{ padding: '24px', backgroundColor: '#ffffff', border: '1px solid #dfe3e8', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}
+                      dangerouslySetInnerHTML={{ __html: actionData.generatedContent }} 
+                    />
+                  </BlockStack>
+                </Form>
               </Card>
             </Layout.Section>
           )}
