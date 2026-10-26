@@ -141,22 +141,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       </div>`;
 
       // Construct Fact String
-      let facts = `MERCHANT PROVIDED FACTS (USE THESE EXACTLY, DO NOT INVENT):
-`;
-      if (length || width || height) facts += `- Dimensions: ${length || '?'} x ${width || '?'} x ${height || '?'} ${unit}
-`;
-      if (isEco === 'yes') facts += `- Environment: Eco-Friendly / Sustainable Materials
-`;
-      if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}
-`;
-      if (hasWarranty === 'no') facts += `- Warranty: No Warranty
-`;
-      if (keywords) facts += `- Focus Keywords: ${keywords}
-`;
+      let facts = `MERCHANT PROVIDED FACTS (USE THESE EXACTLY, DO NOT INVENT):\n`;
+      if (length || width || height) facts += `- Dimensions: ${length || '?'} x ${width || '?'} x ${height || '?'} ${unit}\n`;
+      if (isEco === 'yes') facts += `- Environment: Eco-Friendly / Sustainable Materials\n`;
+      if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}\n`;
+      if (hasWarranty === 'no') facts += `- Warranty: No Warranty\n`;
+      if (keywords) facts += `- Focus Keywords: ${keywords}\n`;
 
-      let textPart = `Original Product Title: ${product.title}
-
-${facts}`;
+      let textPart = `Original Product Title: ${product.title}\n\n${facts}`;
       let contents: any[] = [];
       
       if (imageUrl) {
@@ -169,16 +161,12 @@ ${facts}`;
         contents = [{
           role: 'user',
           parts: [
-            { text: systemPrompt + "
-
-" + textPart },
+            { text: `${systemPrompt}\n\n${textPart}` },
             { inlineData: { data: base64Image, mimeType } }
           ]
         }];
       } else {
-        contents = [{ role: 'user', parts: [{ text: systemPrompt + "
-
-" + textPart }] }];
+        contents = [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${textPart}` }] }];
       }
 
       const response = await generateWithRetry(ai, modelName, contents);
