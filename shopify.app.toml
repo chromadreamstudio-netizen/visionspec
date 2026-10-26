@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "a1db5345bf74147183b31ec8b0b45785"
+client_id = "6b07c5cf80dfceefd108b40f33c4f375"
 name = "visionspec-pro"
 application_url = "https://visionspec.vercel.app"
 embedded = true

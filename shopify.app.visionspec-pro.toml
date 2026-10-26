@@ -1,19 +1,28 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
-
 client_id = "6b07c5cf80dfceefd108b40f33c4f375"
 name = "visionspec-pro"
-application_url = "https://example.com"
+application_url = "https://visionspec.vercel.app"
 embedded = true
 
-[webhooks]
-api_version = "2027-01"
-
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_metaobject_definitions,write_metaobjects,write_products"
+scopes = "read_products,write_products"
+
+[webhooks]
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ 
+  "https://visionspec.vercel.app/auth/callback",
+  "https://visionspec.vercel.app/auth/shopify/callback",
+  "https://visionspec.vercel.app/api/auth/callback"
+]
 
 [build]
 automatically_update_urls_on_dev = true
