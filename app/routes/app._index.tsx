@@ -131,7 +131,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         .join(", ");
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash"; 
+      const modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash"; 
       
       const systemPrompt = `You are an elite E-Commerce Conversion Copywriter, Technical Engineer, and SEO Specialist.
 Analyze the provided product details, product image (if available), and STRICT GROUND-TRUTH FACTS from the merchant.
