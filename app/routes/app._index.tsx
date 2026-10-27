@@ -43,6 +43,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                   node {
                     sku
                     title
+                    price
                   }
                 }
               }
@@ -58,17 +59,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 };
 
-// دالة ذكية لاستخراج رابط الصورة المباشر حتى لو وضع العميل رابط صفحة الموقع (مثل pugalopet.com)
+// دالة ذكية لاستخراج رابط الصورة المباشر من صفحة الموقع (مثل pugalopet.com)
 async function resolveDirectImageUrl(inputUrl: string): Promise<string> {
   if (!inputUrl) return "";
   const trimmed = inputUrl.trim();
   
-  // إذا كان الرابط ينتهي بامتداد صورة صريح، نستخدمه مباشرة
   if (/\.(jpg|jpeg|png|webp|gif)(\?.*)?$/i.test(trimmed)) {
     return trimmed;
   }
 
-  // إذا كان رابط صفحة ويب (مثل صفحة منتج في موقع المصنع)، نقوم بسحب الصورة الرئيسية تلقائياً (og:image)
   try {
     const res = await fetch(trimmed, {
       headers: {
@@ -77,7 +76,6 @@ async function resolveDirectImageUrl(inputUrl: string): Promise<string> {
     });
     const html = await res.text();
 
-    // 1. البحث عن og:image في الميتا تاج
     const ogMatch =
       html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
@@ -86,7 +84,6 @@ async function resolveDirectImageUrl(inputUrl: string): Promise<string> {
       return new URL(ogMatch[1], trimmed).href;
     }
 
-    // 2. البحث عن twitter:image
     const twitterMatch =
       html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i);
@@ -95,13 +92,12 @@ async function resolveDirectImageUrl(inputUrl: string): Promise<string> {
       return new URL(twitterMatch[1], trimmed).href;
     }
 
-    // 3. البحث عن أول صورة منتج كبيرة داخل الصفحة
     const imgMatch = html.match(/<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i);
     if (imgMatch && imgMatch[1]) {
       return new URL(imgMatch[1], trimmed).href;
     }
   } catch (e) {
-    // في حال فشل سحب الصفحة نتجاهل بهدوء
+    // ignore fetch errors silently
   }
   return "";
 }
@@ -119,14 +115,12 @@ function cleanAndExtractJson(rawText: string, fallbackTitle: string) {
       htmlContent: (parsed.htmlContent || "").replace(/\\n/g, "\n").replace(/\\"/g, '"'),
     };
   } catch (e) {
-    // إذا فشل JSON.parse بسبب أسطر جديدة غير مهربة، نستخرج كل حقل بالـ Regex بدقة
     const seoTitleMatch = cleaned.match(/"seoTitle"\s*:\s*"([^"]+)"/);
     const metaTitleMatch = cleaned.match(/"metaTitle"\s*:\s*"([^"]+)"/);
     const metaDescMatch = cleaned.match(/"metaDescription"\s*:\s*"([^"]+)"/);
     const htmlMatch = cleaned.match(/"htmlContent"\s*:\s*"([\s\S]*)"\s*\}/);
 
     let extractedHtml = htmlMatch ? htmlMatch[1] : cleaned;
-    // تنظيف أي بقايا JSON من بداية النص
     extractedHtml = extractedHtml
       .replace(/^\s*\{\s*"seoTitle"[\s\S]*?"htmlContent"\s*:\s*"/i, "")
       .replace(/"\s*\}\s*$/i, "")
@@ -171,6 +165,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     
     const newTitleInput = formData.get("newTitleInput") as string;
     const newImageUrl = formData.get("newImageUrl") as string;
+    const newPrice = formData.get("newPrice") as string;
+    const newSku = formData.get("newSku") as string;
+    const colorOptions = formData.get("colorOptions") as string;
 
     const rawSpecs = formData.get("rawSpecs") as string;
     const length = formData.get("length") as string;
@@ -211,7 +208,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         resolvedImageUrl = product.images?.edges[0]?.node?.url || "";
         productContext = `Vendor: ${product.vendor || 'N/A'}\nOriginal Description: ${product.descriptionHtml || 'None'}`;
       } else {
-        // في وضع Create: نستخرج رابط الصورة الحقيقي حتى لو وضع رابط صفحة موقع المصنع
         resolvedImageUrl = await resolveDirectImageUrl(newImageUrl);
       }
 
@@ -224,7 +220,7 @@ Analyze the provided product title, image (if available), and STRICT GROUND-TRUT
 CRITICAL RULES:
 1. Write all output entirely in ${language}.
 2. ZERO HALLUCINATION POLICY: Never invent dimensions, sub-component measurements, or warranties. Use ONLY the merchant's facts and raw factory specs.
-3. Parse every single dimension and material from "Raw Factory Specs" into separate, well-organized rows inside the HTML Technical Specifications table.
+3. Parse every single dimension, material, Stock Code/SKU, and Available Color Options into separate, well-organized rows inside the HTML Technical Specifications table.
 4. Industry Context: Tailor the benefits and tone for "${category}".
 5. For "htmlContent", output pure, valid HTML ONLY following the exact template below (do NOT include literal "\\n" text strings).
 
@@ -262,6 +258,8 @@ HTML TEMPLATE FOR "htmlContent":
 
       let facts = `MERCHANT GROUND-TRUTH FACTS:\n`;
       if (rawSpecs) facts += `- Raw Factory Specs:\n${rawSpecs}\n`;
+      if (colorOptions) facts += `- Available Colors / Variations: ${colorOptions}\n`;
+      if (newSku && mode === "create") facts += `- Factory Stock Code / SKU: ${newSku}\n`;
       if (length || width || height) facts += `- Overall Dimensions: ${length || '-'} x ${width || '-'} x ${height || '-'} ${unit}\n`;
       if (isEco === 'yes') facts += `- Sustainability: Eco-Friendly & Non-Toxic Materials\n`;
       if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}\n`;
@@ -294,7 +292,6 @@ HTML TEMPLATE FOR "htmlContent":
         contents = [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${textPart}` }] }];
       }
 
-      // إجبار Gemini على إخراج JSON نقي ومهيكل 100%
       const generationConfig = {
         responseMimeType: "application/json",
         responseSchema: {
@@ -324,6 +321,9 @@ HTML TEMPLATE FOR "htmlContent":
         selectedProduct: productId,
         newTitleInput: baseTitle,
         newImageUrl: resolvedImageUrl,
+        newPrice,
+        newSku,
+        colorOptions,
       });
     } catch (error: any) {
       return Response.json({ error: `AI Error: ${error.message || "Failed to analyze product."}` });
@@ -338,15 +338,35 @@ HTML TEMPLATE FOR "htmlContent":
     const metaTitle = formData.get("metaTitle") as string;
     const metaDescription = formData.get("metaDescription") as string;
     const newImageUrl = formData.get("newImageUrl") as string;
+    const newPrice = (formData.get("newPrice") as string) || "";
+    const newSku = (formData.get("newSku") as string) || "";
+    const colorOptionsRaw = (formData.get("colorOptions") as string) || "";
 
     if (!htmlContent) return Response.json({ error: "Missing content." });
 
+    const parsedColors = colorOptionsRaw
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+
     try {
       if (mode === "create") {
+        // 1. إنشاء المنتج مع خيار الألوان (إن وجد)
         const createMutation = `
           mutation productCreate($input: ProductInput!, $media: [CreateMediaInput!]) {
             productCreate(input: $input, media: $media) {
-              product { id title }
+              product {
+                id
+                title
+                variants(first: 10) {
+                  edges {
+                    node {
+                      id
+                      title
+                    }
+                  }
+                }
+              }
               userErrors { field message }
             }
           }`;
@@ -354,8 +374,17 @@ HTML TEMPLATE FOR "htmlContent":
         const productInput: any = {
           title: seoTitle,
           descriptionHtml: htmlContent,
-          seo: { title: metaTitle, description: metaDescription }
+          seo: { title: metaTitle, description: metaDescription },
         };
+
+        if (parsedColors.length > 0) {
+          productInput.productOptions = [
+            {
+              name: "Color",
+              values: parsedColors.map((colorName) => ({ name: colorName })),
+            },
+          ];
+        }
 
         const mediaInput = newImageUrl ? [{ originalSource: newImageUrl, mediaContentType: "IMAGE" }] : [];
 
@@ -370,13 +399,73 @@ HTML TEMPLATE FOR "htmlContent":
           return Response.json({ error: `Shopify Create Error: ${userErrors.map((e:any)=>e.message).join(", ")}` });
         }
 
+        const createdProduct = createData?.data?.productCreate?.product;
+        const createdProductId = createdProduct?.id;
+        const existingVariants = createdProduct?.variants?.edges || [];
+
+        // 2. تحديث السعر والـ SKU للمتغير الأول، وإنشاء باقي متغيرات الألوان أوتوماتيكياً!
+        if (createdProductId) {
+          // أ) تحديث المتغير الأول الذي أنشأه شوبيفاي تلقائياً
+          if (existingVariants.length > 0 && (newPrice || newSku)) {
+            const firstVariantId = existingVariants[0].node.id;
+            const firstColorSuffix = parsedColors.length > 0 ? `-${parsedColors[0].toUpperCase().replace(/\s+/g, "")}` : "";
+            const variantUpdatePayload: any = { id: firstVariantId };
+            if (newPrice) variantUpdatePayload.price = newPrice;
+            if (newSku) variantUpdatePayload.inventoryItem = { sku: `${newSku}${firstColorSuffix}` };
+
+            await admin.graphql(
+              `mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+                productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                  productVariants { id }
+                  userErrors { field message }
+                }
+              }`,
+              {
+                variables: {
+                  productId: createdProductId,
+                  variants: [variantUpdatePayload],
+                },
+              }
+            );
+          }
+
+          // ب) إذا كان هناك أكثر من لون (مثل Blue, Pink, Orange)، ننشئ المتغيرات الإضافية فوراً
+          if (parsedColors.length > 1) {
+            const additionalVariants = parsedColors.slice(1).map((colorName) => {
+              const colorSuffix = `-${colorName.toUpperCase().replace(/\s+/g, "")}`;
+              const vInput: any = {
+                optionValues: [{ optionName: "Color", name: colorName }],
+              };
+              if (newPrice) vInput.price = newPrice;
+              if (newSku) vInput.inventoryItem = { sku: `${newSku}${colorSuffix}` };
+              return vInput;
+            });
+
+            await admin.graphql(
+              `mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+                productVariantsBulkCreate(productId: $productId, variants: $variants) {
+                  productVariants { id title }
+                  userErrors { field message }
+                }
+              }`,
+              {
+                variables: {
+                  productId: createdProductId,
+                  variants: additionalVariants,
+                },
+              }
+            );
+          }
+        }
+
         return Response.json({ 
           actionType: "inject", 
           success: true, 
-          message: "New Product Created & Published to Shopify with Image, Smart Table & SEO! 🎉" 
+          message: `New Product Created with ${parsedColors.length > 0 ? parsedColors.length + " Color Variants, " : ""}Image, Price, SKU & Full SEO! 🎉` 
         });
 
       } else {
+        // وضع Enhance Existing Product
         const productInput: any = {
           id: productId,
           descriptionHtml: htmlContent,
@@ -439,6 +528,9 @@ export default function Index() {
   const [selectedProduct, setSelectedProduct] = useState("");
   const [newTitleInput, setNewTitleInput] = useState("");
   const [newImageUrl, setNewImageUrl] = useState("");
+  const [newPrice, setNewPrice] = useState("29.99");
+  const [newSku, setNewSku] = useState("SEDFCZ4KHF_89461");
+  const [colorOptions, setColorOptions] = useState("Mustard, Blue, Pink, Orange");
 
   const [language, setLanguage] = useState("English");
   const [category, setCategory] = useState("Pet Supplies & Furniture");
@@ -476,7 +568,7 @@ export default function Index() {
   }, [actionData]);
 
   return (
-    <Page title="VisionSpec Pro AI" subtitle="Enterprise Product Intelligence & Smart Creator Suite">
+    <Page title="VisionSpec Pro AI" subtitle="Enterprise Product Intelligence, Multi-Variant & Smart Creator Suite">
       <BlockStack gap="500">
         <Layout>
           
@@ -518,7 +610,7 @@ export default function Index() {
                   <Card>
                     <BlockStack gap="400">
                       <Text as="h2" variant="headingMd">
-                        {mode === "enhance" ? "1. Select Existing Product" : "1. New Product Details"}
+                        {mode === "enhance" ? "1. Select Existing Product" : "1. New Product & Variants"}
                       </Text>
 
                       {mode === "enhance" ? (
@@ -550,19 +642,51 @@ export default function Index() {
                             value={newTitleInput}
                             onChange={setNewTitleInput}
                             autoComplete="off"
-                            placeholder="e.g. Pugalo Large Cat House with Bed, Mustard"
+                            placeholder="e.g. Pugalo Large Cat House with Bed"
                           />
                           <TextField
-                            label="Product Page URL or Direct Image Link (Optional)"
+                            label="Product Page URL or Direct Image Link"
                             name="newImageUrl"
                             value={newImageUrl}
                             onChange={setNewImageUrl}
                             autoComplete="off"
                             placeholder="[https://www.pugalopet.com/urun/](https://www.pugalopet.com/urun/)..."
-                            helpText="Paste a product webpage URL (we auto-extract the main photo!) or a direct .jpg/.png link."
+                            helpText="Paste webpage URL (auto-extracts photo) or direct .jpg/.png link."
                           />
+                          <InlineStack gap="300" wrap={false}>
+                            <div style={{flex: 1}}>
+                              <TextField
+                                label="Price"
+                                name="newPrice"
+                                value={newPrice}
+                                onChange={setNewPrice}
+                                autoComplete="off"
+                                placeholder="29.99"
+                              />
+                            </div>
+                            <div style={{flex: 1}}>
+                              <TextField
+                                label="Stock Code / Base SKU"
+                                name="newSku"
+                                value={newSku}
+                                onChange={setNewSku}
+                                autoComplete="off"
+                                placeholder="SEDFCZ4KHF_89461"
+                              />
+                            </div>
+                          </InlineStack>
                         </>
                       )}
+
+                      <TextField
+                        label="Available Colors / Variations (Comma Separated)"
+                        name="colorOptions"
+                        value={colorOptions}
+                        onChange={setColorOptions}
+                        autoComplete="off"
+                        placeholder="e.g. Mustard, Blue, Pink, Orange"
+                        helpText="Creates real Shopify Color Variants automatically + adds to spec table!"
+                      />
 
                       <Select
                         label="Industry Template"
@@ -602,9 +726,9 @@ export default function Index() {
                         name="rawSpecs"
                         value={rawSpecs}
                         onChange={setRawSpecs}
-                        multiline={4}
+                        multiline={5}
                         autoComplete="off"
-                        placeholder="Nest: 36x30x37 cm | Base: 42x56 cm | Height: 85 cm"
+                        placeholder="DIMENSIONS: Base: 40 x 70 cm; House: 38 x 38 x 38 cm; Scratching Post: 50 cm..."
                       />
 
                       <Divider />
@@ -671,7 +795,7 @@ export default function Index() {
               <div style={{ marginTop: '20px' }}>
                 <Card>
                   <InlineStack align="space-between" blockAlign="center">
-                    <Text as="p" variant="bodyMd">Generate complete sales copy, multi-part tech table & SEO metadata.</Text>
+                    <Text as="p" variant="bodyMd">Generate complete sales copy, multi-part tech table, color variants & SEO metadata.</Text>
                     <Button submit variant="primary" size="large" loading={isGenerating} disabled={mode === "enhance" && !selectedProduct}>
                       Generate Smart Listing ✨
                     </Button>
@@ -693,28 +817,43 @@ export default function Index() {
                   <input type="hidden" name="metaTitle" value={editableMetaTitle} />
                   <input type="hidden" name="metaDescription" value={editableMetaDesc} />
                   <input type="hidden" name="newImageUrl" value={actionData.newImageUrl || ""} />
+                  <input type="hidden" name="newPrice" value={actionData.newPrice || newPrice} />
+                  <input type="hidden" name="newSku" value={actionData.newSku || newSku} />
+                  <input type="hidden" name="colorOptions" value={actionData.colorOptions || colorOptions} />
 
                   <BlockStack gap="500">
                     <InlineStack align="space-between" blockAlign="center">
                       <Text as="h2" variant="headingLg">3. Review & Publish</Text>
                       <Button submit variant="primary" size="large" loading={isInjecting}>
-                        {actionData.mode === "create" ? "Publish New Product to Shopify 🚀" : "Update Shopify Product 🚀"}
+                        {actionData.mode === "create" ? "Publish Product + Variants to Shopify 🚀" : "Update Shopify Product 🚀"}
                       </Button>
                     </InlineStack>
 
                     <Divider />
 
-                    {actionData.newImageUrl && (
-                      <div style={{ padding: '12px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                        <InlineStack gap="300" blockAlign="center">
-                          <img src={actionData.newImageUrl} alt="Extracted Product" style={{ width: '70px', height: '70px', objectFit: 'cover', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
-                          <BlockStack gap="100">
-                            <Badge tone="success">✓ Product Image Extracted Automatically</Badge>
-                            <Text as="p" variant="bodySm" tone="subdued">This photo will be uploaded directly to your Shopify product media.</Text>
+                    <InlineStack gap="400" blockAlign="center">
+                      {actionData.newImageUrl && (
+                        <div style={{ padding: '12px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', flex: 1 }}>
+                          <InlineStack gap="300" blockAlign="center">
+                            <img src={actionData.newImageUrl} alt="Extracted Product" style={{ width: '64px', height: '64px', objectFit: 'cover', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+                            <BlockStack gap="100">
+                              <Badge tone="success">✓ Product Image Extracted</Badge>
+                              <Text as="p" variant="bodySm" tone="subdued">Ready for Shopify media upload.</Text>
+                            </BlockStack>
+                          </InlineStack>
+                        </div>
+                      )}
+
+                      {colorOptions && (
+                        <div style={{ padding: '12px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', flex: 1 }}>
+                          <BlockStack gap="200">
+                            <Badge tone="info">🎨 Auto-Creating Color Variants</Badge>
+                            <Text as="p" variant="bodySm" fontWeight="bold">{colorOptions}</Text>
+                            <Text as="p" variant="bodySm" tone="subdued">Price: ${newPrice} | Base SKU: {newSku}</Text>
                           </BlockStack>
-                        </InlineStack>
-                      </div>
-                    )}
+                        </div>
+                      )}
+                    </InlineStack>
 
                     <TextField label="Optimized Title" value={editableSeoTitle} onChange={setEditableSeoTitle} autoComplete="off" />
                     
