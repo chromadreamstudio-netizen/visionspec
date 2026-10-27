@@ -125,7 +125,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         baseTitle = product.title;
         imageUrl = product.images?.edges[0]?.node?.url;
-        productContext = `Vendor: ${product.vendor || 'N/A'}\nOriginal Description: ${product.descriptionHtml || 'None'}`;
+        productContext = `Vendor: ${product.vendor || 'N/A'}
+Original Description: ${product.descriptionHtml || 'None'}`;
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -179,16 +180,28 @@ HTML TEMPLATE FOR "htmlContent":
   </div>
 </div>`;
 
-      let facts = `MERCHANT GROUND-TRUTH FACTS:\n`;
-      if (rawSpecs) facts += `- Raw Factory Specs: \n${rawSpecs}\n`;
-      if (length || width || height) facts += `- Overall Dimensions: ${length || '-'} x ${width || '-'} x ${height || '-'} ${unit}\n`;
-      if (isEco === 'yes') facts += `- Sustainability: Eco-Friendly & Non-Toxic Materials\n`;
-      if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}\n`;
-      if (hasWarranty === 'no') facts += `- Warranty: None\n`;
-      facts += `- Include EU Safety Notice Block: ${requiresSafety === 'yes' ? 'YES' : 'NO'}\n`;
-      if (keywords) facts += `- Target SEO Keywords: ${keywords}\n`;
+      let facts = `MERCHANT GROUND-TRUTH FACTS:
+`;
+      if (rawSpecs) facts += `- Raw Factory Specs: 
+${rawSpecs}
+`;
+      if (length || width || height) facts += `- Overall Dimensions: ${length || '-'} x ${width || '-'} x ${height || '-'} ${unit}
+`;
+      if (isEco === 'yes') facts += `- Sustainability: Eco-Friendly & Non-Toxic Materials
+`;
+      if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}
+`;
+      if (hasWarranty === 'no') facts += `- Warranty: None
+`;
+      facts += `- Include EU Safety Notice Block: ${requiresSafety === 'yes' ? 'YES' : 'NO'}
+`;
+      if (keywords) facts += `- Target SEO Keywords: ${keywords}
+`;
 
-      const textPart = `Product Title: ${baseTitle}\n${productContext}\n\n${facts}`;
+      const textPart = `Product Title: ${baseTitle}
+${productContext}
+
+${facts}`;
       let contents: any[] = [];
       
       if (imageUrl && (imageUrl.includes('.jpg') || imageUrl.includes('.jpeg') || imageUrl.includes('.png') || imageUrl.includes('.webp'))) {
@@ -215,7 +228,14 @@ HTML TEMPLATE FOR "htmlContent":
 
       const response = await generateWithRetry(ai, modelName, contents);
       let rawText = response.text || "";
-      rawText = rawText.replace(/```json/g, "").replace(/```html/g, "").replace(/```/g, "").trim();
+      
+      // استخراج كود JSON فقط وتجاهل أي نصوص خارجية
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        rawText = jsonMatch[0];
+      } else {
+        rawText = rawText.replace(/```json/g, "").replace(/```html/g, "").replace(/```/g, "").trim();
+      }
 
       let parsedResult;
       try {
