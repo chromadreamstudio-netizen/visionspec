@@ -15,13 +15,12 @@ import {
   Select,
   Grid,
   Badge,
-  Checkbox,
   ButtonGroup,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
-// 1. Loader
+// 1. Loader: سحب المنتجات الحالية من شوبيفاي
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   try {
@@ -59,10 +58,95 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 };
 
-async function generateWithRetry(ai: GoogleGenAI, modelName: string, contents: any, retries = 3, delay = 2000) {
+// دالة ذكية لاستخراج رابط الصورة المباشر حتى لو وضع العميل رابط صفحة الموقع (مثل pugalopet.com)
+async function resolveDirectImageUrl(inputUrl: string): Promise<string> {
+  if (!inputUrl) return "";
+  const trimmed = inputUrl.trim();
+  
+  // إذا كان الرابط ينتهي بامتداد صورة صريح، نستخدمه مباشرة
+  if (/\.(jpg|jpeg|png|webp|gif)(\?.*)?$/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  // إذا كان رابط صفحة ويب (مثل صفحة منتج في موقع المصنع)، نقوم بسحب الصورة الرئيسية تلقائياً (og:image)
+  try {
+    const res = await fetch(trimmed, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    });
+    const html = await res.text();
+
+    // 1. البحث عن og:image في الميتا تاج
+    const ogMatch =
+      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    
+    if (ogMatch && ogMatch[1]) {
+      return new URL(ogMatch[1], trimmed).href;
+    }
+
+    // 2. البحث عن twitter:image
+    const twitterMatch =
+      html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i);
+
+    if (twitterMatch && twitterMatch[1]) {
+      return new URL(twitterMatch[1], trimmed).href;
+    }
+
+    // 3. البحث عن أول صورة منتج كبيرة داخل الصفحة
+    const imgMatch = html.match(/<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i);
+    if (imgMatch && imgMatch[1]) {
+      return new URL(imgMatch[1], trimmed).href;
+    }
+  } catch (e) {
+    // في حال فشل سحب الصفحة نتجاهل بهدوء
+  }
+  return "";
+}
+
+// دالة تنظيف احتياطية مضادة للرصاص لمنع ظهور {"seoTitle" أو \n نهائياً
+function cleanAndExtractJson(rawText: string, fallbackTitle: string) {
+  let cleaned = rawText.replace(/```json/gi, "").replace(/```html/gi, "").replace(/```/g, "").trim();
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    return {
+      seoTitle: parsed.seoTitle || fallbackTitle,
+      metaTitle: parsed.metaTitle || fallbackTitle.slice(0, 60),
+      metaDescription: parsed.metaDescription || "High quality product verified by VisionSpec Pro AI.",
+      htmlContent: (parsed.htmlContent || "").replace(/\\n/g, "\n").replace(/\\"/g, '"'),
+    };
+  } catch (e) {
+    // إذا فشل JSON.parse بسبب أسطر جديدة غير مهربة، نستخرج كل حقل بالـ Regex بدقة
+    const seoTitleMatch = cleaned.match(/"seoTitle"\s*:\s*"([^"]+)"/);
+    const metaTitleMatch = cleaned.match(/"metaTitle"\s*:\s*"([^"]+)"/);
+    const metaDescMatch = cleaned.match(/"metaDescription"\s*:\s*"([^"]+)"/);
+    const htmlMatch = cleaned.match(/"htmlContent"\s*:\s*"([\s\S]*)"\s*\}/);
+
+    let extractedHtml = htmlMatch ? htmlMatch[1] : cleaned;
+    // تنظيف أي بقايا JSON من بداية النص
+    extractedHtml = extractedHtml
+      .replace(/^\s*\{\s*"seoTitle"[\s\S]*?"htmlContent"\s*:\s*"/i, "")
+      .replace(/"\s*\}\s*$/i, "")
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, '"')
+      .trim();
+
+    return {
+      seoTitle: seoTitleMatch ? seoTitleMatch[1] : fallbackTitle,
+      metaTitle: metaTitleMatch ? metaTitleMatch[1] : fallbackTitle.slice(0, 60),
+      metaDescription: metaDescMatch ? metaDescMatch[1] : "High quality product verified by VisionSpec Pro AI.",
+      htmlContent: extractedHtml,
+    };
+  }
+}
+
+async function generateWithRetry(ai: GoogleGenAI, modelName: string, contents: any, config: any, retries = 3, delay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
-      return await ai.models.generateContent({ model: modelName, contents });
+      return await ai.models.generateContent({ model: modelName, contents, config });
     } catch (error: any) {
       if ((error.status === 503 || error.code === 503 || JSON.stringify(error).includes("503")) && i < retries - 1) {
         await new Promise((res) => setTimeout(res, delay));
@@ -104,7 +188,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     try {
       let baseTitle = newTitleInput;
-      let imageUrl = newImageUrl;
+      let resolvedImageUrl = "";
       let productContext = "";
 
       if (mode === "enhance") {
@@ -124,9 +208,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (!product) return Response.json({ error: "Product not found." });
 
         baseTitle = product.title;
-        imageUrl = product.images?.edges[0]?.node?.url;
-        productContext = `Vendor: ${product.vendor || 'N/A'}
-Original Description: ${product.descriptionHtml || 'None'}`;
+        resolvedImageUrl = product.images?.edges[0]?.node?.url || "";
+        productContext = `Vendor: ${product.vendor || 'N/A'}\nOriginal Description: ${product.descriptionHtml || 'None'}`;
+      } else {
+        // في وضع Create: نستخرج رابط الصورة الحقيقي حتى لو وضع رابط صفحة موقع المصنع
+        resolvedImageUrl = await resolveDirectImageUrl(newImageUrl);
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -138,16 +224,9 @@ Analyze the provided product title, image (if available), and STRICT GROUND-TRUT
 CRITICAL RULES:
 1. Write all output entirely in ${language}.
 2. ZERO HALLUCINATION POLICY: Never invent dimensions, sub-component measurements, or warranties. Use ONLY the merchant's facts and raw factory specs.
-3. Parse any "Raw Factory Specs" into separate rows inside the Technical Specifications table.
-4. Industry Context: Tailor the tone for "${category}".
-
-Return your response as a valid JSON object ONLY with this exact structure:
-{
-  "seoTitle": "High-converting, SEO-optimized Product Title",
-  "metaTitle": "Google Search SEO Title (Max 60 characters)",
-  "metaDescription": "Compelling Google Search Meta Description (Max 155 characters)",
-  "htmlContent": "Complete HTML for product description following the exact template below"
-}
+3. Parse every single dimension and material from "Raw Factory Specs" into separate, well-organized rows inside the HTML Technical Specifications table.
+4. Industry Context: Tailor the benefits and tone for "${category}".
+5. For "htmlContent", output pure, valid HTML ONLY following the exact template below (do NOT include literal "\\n" text strings).
 
 HTML TEMPLATE FOR "htmlContent":
 <div class="visionspec-smart-listing" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; line-height: 1.6;">
@@ -158,6 +237,7 @@ HTML TEMPLATE FOR "htmlContent":
   <ul style="margin-bottom: 24px; padding-left: 20px; color: #374151;">
     <li style="margin-bottom: 8px;"><strong>[Feature 1]:</strong> [Explanation]</li>
     <li style="margin-bottom: 8px;"><strong>[Feature 2]:</strong> [Explanation]</li>
+    <li style="margin-bottom: 8px;"><strong>[Feature 3]:</strong> [Explanation]</li>
   </ul>
 
   <h3 style="font-size: 1.15em; font-weight: 600; color: #111827; margin-bottom: 12px; border-bottom: 2px solid #e5e7eb; padding-bottom: 6px;">📐 Technical Specifications</h3>
@@ -169,7 +249,7 @@ HTML TEMPLATE FOR "htmlContent":
       </tr>
     </thead>
     <tbody>
-      [Generate alternating table rows with padding: 12px 16px; border-bottom: 1px solid #e5e7eb;]
+      [Generate alternating table rows (#ffffff and #f9fafb) with padding: 12px 16px; border-bottom: 1px solid #e5e7eb;]
     </tbody>
   </table>
 
@@ -180,33 +260,21 @@ HTML TEMPLATE FOR "htmlContent":
   </div>
 </div>`;
 
-      let facts = `MERCHANT GROUND-TRUTH FACTS:
-`;
-      if (rawSpecs) facts += `- Raw Factory Specs: 
-${rawSpecs}
-`;
-      if (length || width || height) facts += `- Overall Dimensions: ${length || '-'} x ${width || '-'} x ${height || '-'} ${unit}
-`;
-      if (isEco === 'yes') facts += `- Sustainability: Eco-Friendly & Non-Toxic Materials
-`;
-      if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}
-`;
-      if (hasWarranty === 'no') facts += `- Warranty: None
-`;
-      facts += `- Include EU Safety Notice Block: ${requiresSafety === 'yes' ? 'YES' : 'NO'}
-`;
-      if (keywords) facts += `- Target SEO Keywords: ${keywords}
-`;
+      let facts = `MERCHANT GROUND-TRUTH FACTS:\n`;
+      if (rawSpecs) facts += `- Raw Factory Specs:\n${rawSpecs}\n`;
+      if (length || width || height) facts += `- Overall Dimensions: ${length || '-'} x ${width || '-'} x ${height || '-'} ${unit}\n`;
+      if (isEco === 'yes') facts += `- Sustainability: Eco-Friendly & Non-Toxic Materials\n`;
+      if (hasWarranty === 'yes' && warrantyPeriod) facts += `- Warranty: ${warrantyPeriod}\n`;
+      if (hasWarranty === 'no') facts += `- Warranty: None\n`;
+      facts += `- Include EU Safety Notice Block: ${requiresSafety === 'yes' ? 'YES' : 'NO'}\n`;
+      if (keywords) facts += `- Target SEO Keywords: ${keywords}\n`;
 
-      const textPart = `Product Title: ${baseTitle}
-${productContext}
-
-${facts}`;
+      const textPart = `Product Title: ${baseTitle}\n${productContext}\n\n${facts}`;
       let contents: any[] = [];
       
-      if (imageUrl && (imageUrl.includes('.jpg') || imageUrl.includes('.jpeg') || imageUrl.includes('.png') || imageUrl.includes('.webp'))) {
+      if (resolvedImageUrl) {
         try {
-          const imgFetch = await fetch(imageUrl);
+          const imgFetch = await fetch(resolvedImageUrl);
           const arrayBuffer = await imgFetch.arrayBuffer();
           const buffer = Buffer.from(arrayBuffer);
           const base64Image = buffer.toString("base64");
@@ -226,28 +294,24 @@ ${facts}`;
         contents = [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${textPart}` }] }];
       }
 
-      const response = await generateWithRetry(ai, modelName, contents);
-      let rawText = response.text || "";
-      
-      // استخراج كود JSON فقط وتجاهل أي نصوص خارجية
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        rawText = jsonMatch[0];
-      } else {
-        rawText = rawText.replace(/```json/g, "").replace(/```html/g, "").replace(/```/g, "").trim();
-      }
+      // إجبار Gemini على إخراج JSON نقي ومهيكل 100%
+      const generationConfig = {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            seoTitle: { type: Type.STRING },
+            metaTitle: { type: Type.STRING },
+            metaDescription: { type: Type.STRING },
+            htmlContent: { type: Type.STRING },
+          },
+          required: ["seoTitle", "metaTitle", "metaDescription", "htmlContent"],
+        },
+      };
 
-      let parsedResult;
-      try {
-        parsedResult = JSON.parse(rawText);
-      } catch (e) {
-        parsedResult = {
-          seoTitle: baseTitle,
-          metaTitle: baseTitle.slice(0, 60),
-          metaDescription: "High quality product verified by VisionSpec Pro AI.",
-          htmlContent: rawText,
-        };
-      }
+      const response = await generateWithRetry(ai, modelName, contents, generationConfig);
+      const rawText = response?.text || "";
+      const parsedResult = cleanAndExtractJson(rawText, baseTitle);
 
       return Response.json({ 
         actionType: "generate",
@@ -259,7 +323,7 @@ ${facts}`;
         metaDescription: parsedResult.metaDescription,
         selectedProduct: productId,
         newTitleInput: baseTitle,
-        newImageUrl: imageUrl || "",
+        newImageUrl: resolvedImageUrl,
       });
     } catch (error: any) {
       return Response.json({ error: `AI Error: ${error.message || "Failed to analyze product."}` });
@@ -293,8 +357,7 @@ ${facts}`;
           seo: { title: metaTitle, description: metaDescription }
         };
 
-        const isValidImage = newImageUrl && (newImageUrl.includes('.jpg') || newImageUrl.includes('.jpeg') || newImageUrl.includes('.png') || newImageUrl.includes('.webp'));
-        const mediaInput = isValidImage ? [{ originalSource: newImageUrl, mediaContentType: "IMAGE" }] : [];
+        const mediaInput = newImageUrl ? [{ originalSource: newImageUrl, mediaContentType: "IMAGE" }] : [];
 
         const createRes = await admin.graphql(createMutation, {
           variables: { input: productInput, media: mediaInput }
@@ -310,7 +373,7 @@ ${facts}`;
         return Response.json({ 
           actionType: "inject", 
           success: true, 
-          message: "New Product Created & Published to Shopify with Full Smart Listing & SEO! 🎉" 
+          message: "New Product Created & Published to Shopify with Image, Smart Table & SEO! 🎉" 
         });
 
       } else {
@@ -487,16 +550,16 @@ export default function Index() {
                             value={newTitleInput}
                             onChange={setNewTitleInput}
                             autoComplete="off"
-                            placeholder="e.g. Pugalo Triangular Cat House"
+                            placeholder="e.g. Pugalo Large Cat House with Bed, Mustard"
                           />
                           <TextField
-                            label="Product Image URL (Optional)"
+                            label="Product Page URL or Direct Image Link (Optional)"
                             name="newImageUrl"
                             value={newImageUrl}
                             onChange={setNewImageUrl}
                             autoComplete="off"
-                            placeholder="[https://example.com/image.jpg](https://example.com/image.jpg)"
-                            helpText="MUST be a direct image link ending in .jpg or .png (Not a webpage URL)"
+                            placeholder="[https://www.pugalopet.com/urun/](https://www.pugalopet.com/urun/)..."
+                            helpText="Paste a product webpage URL (we auto-extract the main photo!) or a direct .jpg/.png link."
                           />
                         </>
                       )}
@@ -641,6 +704,18 @@ export default function Index() {
 
                     <Divider />
 
+                    {actionData.newImageUrl && (
+                      <div style={{ padding: '12px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                        <InlineStack gap="300" blockAlign="center">
+                          <img src={actionData.newImageUrl} alt="Extracted Product" style={{ width: '70px', height: '70px', objectFit: 'cover', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+                          <BlockStack gap="100">
+                            <Badge tone="success">✓ Product Image Extracted Automatically</Badge>
+                            <Text as="p" variant="bodySm" tone="subdued">This photo will be uploaded directly to your Shopify product media.</Text>
+                          </BlockStack>
+                        </InlineStack>
+                      </div>
+                    )}
+
                     <TextField label="Optimized Title" value={editableSeoTitle} onChange={setEditableSeoTitle} autoComplete="off" />
                     
                     <Grid>
@@ -654,7 +729,7 @@ export default function Index() {
 
                     <Divider />
 
-                    <Text as="h3" variant="headingMd">Preview</Text>
+                    <Text as="h3" variant="headingMd">Live Clean HTML Preview</Text>
                     <div 
                       style={{ padding: '24px', backgroundColor: '#fff', border: '1px solid #dfe3e8', borderRadius: '8px' }}
                       dangerouslySetInnerHTML={{ __html: actionData.generatedContent }} 
